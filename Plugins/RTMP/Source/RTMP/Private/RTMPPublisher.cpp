@@ -3,6 +3,7 @@
 
 #include "RTMPPublisher.h"
 #include "Misc/ScopeExit.h"
+#include "GameFramework/GameUserSettings.h"
 #include "GameViewportRecorder.h"
 
 THIRD_PARTY_INCLUDES_START
@@ -28,7 +29,6 @@ DEFINE_LOG_CATEGORY(LogFFMPEGEncoder_Audio);
 FRTMPPublisher::FRTMPPublisher()
 	: bInitialized(false)
 	, bHeaderSent(false)
-	, CapturedVideoFrameCount(0)
 	, ViewportRecorder(nullptr)
 	, EncodeThread(nullptr)
 {
@@ -53,18 +53,20 @@ bool FRTMPPublisher::Init()
 
 uint32 FRTMPPublisher::Run()
 {
+	FTimespan VideoIntervalTime = FTimespan::FromMilliseconds(1000.0f / PublisherConfig.Framerate);
+	FDateTime LastVideoTime = FDateTime::Now();
+	FDateTime LastAudioTime = FDateTime::Now();
 	while (!bStopEncodeThread)
 	{
-		bool bSentFrameSuccess = true;
-		if (av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) <= 0) {
-			bSentFrameSuccess = SendVideoFrame();
-		}
-		else {
-			bSentFrameSuccess = SendAudioFrame();
+		if (av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) > 0) {
+			SendAudioFrame();
 		}
 
-		if (!bSentFrameSuccess) {
-			FPlatformProcess::Sleep(0.01);
+		/*av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) <= 0;*/
+		FTimespan VideoPassedTime = FDateTime::Now() - LastVideoTime;
+		if (VideoPassedTime >= VideoIntervalTime) {
+			LastVideoTime = FDateTime::Now();
+			SendVideoFrame();
 		}
 	}
 
@@ -111,10 +113,6 @@ bool FRTMPPublisher::Setup(const FRTMPPublisherConfig& Config)
 	ViewportRecorder->OnViewportRecordedCallback().AddRaw(this, &FRTMPPublisher::OnViewportRecorded);
 
 	FString CombinedUrl = Config.StreamUrl;
-
-	if (!Config.StreamKey.IsEmpty()) {
-		CombinedUrl += TEXT(" ") + Config.StreamKey;
-	}
 	
 	int32 Result = avformat_alloc_output_context2(&OutputFormatCtx, nullptr, "flv", TCHAR_TO_ANSI(*CombinedUrl));
 	if (Result < 0) {
@@ -149,9 +147,6 @@ bool FRTMPPublisher::StartPublish()
 	}
 
 	FString CombinedUrl = PublisherConfig.StreamUrl;
-	if (!PublisherConfig.StreamKey.IsEmpty()) {
-		CombinedUrl += TEXT(" ") + PublisherConfig.StreamKey;
-	}
 
 	if (OutputFormat->flags & AVFMT_NOFILE) {
 		UE_LOG(LogRTMPPublisher, Error, TEXT("Output format flags has AVFMT_NOFILE."));
@@ -171,9 +166,10 @@ bool FRTMPPublisher::StartPublish()
 		return false;
 	}
 
-	bHeaderSent = true;
+	GEngine->GameUserSettings->SetFrameRateLimit(PublisherConfig.Framerate);
+	GEngine->GameUserSettings->ApplySettings(false);
 
-	StartTime = FDateTime::Now();
+	bHeaderSent = true;
 
 	FAudioDevice* AudioDevice = GEngine->GetMainAudioDeviceRaw();
 	if (AudioDevice) {
@@ -184,6 +180,8 @@ bool FRTMPPublisher::StartPublish()
 		UE_LOG(LogRTMPPublisher, Error, TEXT("Cloud not start to record game viewport."));
 		return false;
 	}
+	
+	StartRecordTime = FDateTime::Now();
 
 	EncodeThread = FRunnableThread::Create(this, TEXT("RTMP Publisher"));
 	if (EncodeThread == nullptr) {
@@ -236,10 +234,13 @@ void FRTMPPublisher::Shutdown()
 	// Clear publisher status
 	bInitialized = false;
 	bHeaderSent = false;
-	StartTime = 0;
-
+	StartRecordTime = 0;
 	VideoFrameQueue.Empty();
 	AudioSubmixBuffer.Empty();
+	FrozenFrame = FEncodeFramePayload();
+
+	GEngine->GameUserSettings->SetFrameRateLimit(0);
+	GEngine->GameUserSettings->ApplySettings(false);
 }
 
 bool FRTMPPublisher::AddStream(FOutputStream& Stream, struct AVCodec** Codec, enum AVCodecID CodecId)
@@ -499,10 +500,35 @@ bool FRTMPPublisher::SendVideoFrame()
 	}
 
 	FEncodeFramePayload RawData;
-	if (!VideoFrameQueue.Dequeue(RawData)) {
-		return false;
-	}
+	{
+		FScopeLock Lock(&VideoFrameQueueCS);
+		if (VideoFrameQueue.IsEmpty()) {
+			return false;
+		}
 
+		FTimespan CurrentFrameTimestamp = FTimespan::FromMilliseconds(1000.0f / PublisherConfig.Framerate * (VideoStream.NextPts + 1));
+
+		FEncodeFramePayload PeekedData;
+		while (VideoFrameQueue.Peek(PeekedData))
+		{
+			if (PeekedData.Timestamp <= CurrentFrameTimestamp) {
+				VideoFrameQueue.Dequeue(PeekedData);
+				continue;
+			}
+			else {
+				if (!FrozenFrame.Data.IsValidIndex(0) && !PeekedData.Data.IsValidIndex(0)) {
+					VideoFrameQueue.Dequeue(PeekedData);
+				}
+				break;
+			}
+		}
+
+		if (PeekedData.Data.IsValidIndex(0)) {
+			FrozenFrame = PeekedData;
+		}
+
+		RawData = FrozenFrame;
+	}
 	VideoStream.TempFrame->data[0] = RawData.Data.GetData();
 	VideoStream.TempFrame->linesize[0] = RawData.Width * 4;
 	
@@ -602,21 +628,12 @@ bool FRTMPPublisher::SendFrameInternal(const struct AVRational* TimeBase, struct
 
 void FRTMPPublisher::OnViewportRecorded(const FColor* ColorBuffer, uint32 Width, uint32 Height)
 {
-	FTimespan PassedTime = FDateTime::Now() - StartTime;
-	FTimespan IntervalTime = FTimespan::FromMilliseconds(1000.0 / PublisherConfig.Framerate);
-	FTimespan NextFrameTime = IntervalTime* CapturedVideoFrameCount;
-
-	if (PassedTime < NextFrameTime) {
-		UE_LOG(LogRTMPPublisher, Verbose, TEXT("Cloud not capture this frame when next frame time is not coming, drop it."));
-		return;
-	}	
-
 	FEncodeFramePayload Payload;
+	Payload.Timestamp = FDateTime::Now() - StartRecordTime;
 	Payload.Data.Append((uint8*)ColorBuffer, Width * Height * 4);
 	Payload.Width = Width;
 	Payload.Height = Height;
 
+	FScopeLock Lock(&VideoFrameQueueCS);
 	VideoFrameQueue.Enqueue(Payload);
-
-	CapturedVideoFrameCount++;
 }

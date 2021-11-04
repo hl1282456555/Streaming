@@ -10,6 +10,7 @@ struct FEncodeFramePayload
 	TArray<uint8> Data;
 	uint32 Width;
 	uint32 Height;
+	FTimespan Timestamp;
 };
 
 

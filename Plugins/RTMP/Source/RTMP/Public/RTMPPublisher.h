@@ -70,11 +70,9 @@ protected:
 private:
 	bool bInitialized;
 	bool bHeaderSent;
+	FDateTime StartRecordTime;
 
 	FRTMPPublisherConfig PublisherConfig;
-
-	FDateTime StartTime;
-	uint64 CapturedVideoFrameCount;
 
 	struct AVOutputFormat* OutputFormat;
 	struct AVFormatContext* OutputFormatCtx;
@@ -89,7 +87,9 @@ private:
 	bool bStopEncodeThread;
 	FRunnableThread* EncodeThread;
 
+	FCriticalSection VideoFrameQueueCS;
 	TQueue<FEncodeFramePayload> VideoFrameQueue;
+	FEncodeFramePayload FrozenFrame;
 
 	FCriticalSection AudioSubmixBufferCS;
 	TArray<uint8> AudioSubmixBuffer;

@@ -32,7 +32,7 @@ FRTMPPublisher::FRTMPPublisher()
 	, ViewportRecorder(nullptr)
 	, EncodeThread(nullptr)
 {
-	av_register_all();
+	//av_register_all();
 	avformat_network_init();
 }
 

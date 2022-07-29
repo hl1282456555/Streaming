@@ -3,10 +3,8 @@
 
 #include "RTMPPublisher.h"
 #include "Misc/ScopeExit.h"
-#include "GameFramework/GameUserSettings.h"
 #include "GameViewportRecorder.h"
 
-THIRD_PARTY_INCLUDES_START
 extern "C" {
 #include <libavutil/avassert.h>
 #include <libavutil/channel_layout.h>
@@ -16,11 +14,8 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
-#include <libavcodec/codec.h>
-#include <libavutil/imgutils.h>
 #include <libavutil/error.h>
 }
-THIRD_PARTY_INCLUDES_END
 
 DEFINE_LOG_CATEGORY(LogRTMPPublisher);
 DEFINE_LOG_CATEGORY(LogFFMPEGEncoder_Video);
@@ -63,11 +58,12 @@ uint32 FRTMPPublisher::Run()
 		}
 
 		/*av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) <= 0;*/
-		FTimespan VideoPassedTime = FDateTime::Now() - LastVideoTime;
+		/*FTimespan VideoPassedTime = FDateTime::Now() - LastVideoTime;
 		if (VideoPassedTime >= VideoIntervalTime) {
 			LastVideoTime = FDateTime::Now();
 			SendVideoFrame();
-		}
+		}*/
+		SendVideoFrame();
 	}
 
 	return 0;
@@ -114,7 +110,7 @@ bool FRTMPPublisher::Setup(const FRTMPPublisherConfig& Config)
 
 	FString CombinedUrl = Config.StreamUrl;
 	
-	int32 Result = avformat_alloc_output_context2(&OutputFormatCtx, nullptr, "flv", TCHAR_TO_ANSI(*CombinedUrl));
+	int32 Result = avformat_alloc_output_context2(&OutputFormatCtx, NULL, "flv", TCHAR_TO_ANSI(*CombinedUrl));
 	if (Result < 0) {
 		UE_LOG(LogRTMPPublisher, Error, TEXT("Cloud not allocate output format context."));
 		return false;
@@ -165,9 +161,6 @@ bool FRTMPPublisher::StartPublish()
 		UE_LOG(LogRTMPPublisher, Error, TEXT("Error occurred when opening output file."));
 		return false;
 	}
-
-	GEngine->GameUserSettings->SetFrameRateLimit(PublisherConfig.Framerate);
-	GEngine->GameUserSettings->ApplySettings(false);
 
 	bHeaderSent = true;
 
@@ -238,19 +231,16 @@ void FRTMPPublisher::Shutdown()
 	VideoFrameQueue.Empty();
 	AudioSubmixBuffer.Empty();
 	FrozenFrame = FEncodeFramePayload();
-
-	GEngine->GameUserSettings->SetFrameRateLimit(0);
-	GEngine->GameUserSettings->ApplySettings(false);
 }
 
 bool FRTMPPublisher::AddStream(FOutputStream& Stream, struct AVCodec** Codec, enum AVCodecID CodecId)
 {
 	AVCodecContext* CodecCtx;
 	if (CodecId == AV_CODEC_ID_H264) {
-		*Codec = avcodec_find_encoder_by_name("h264_nvenc");
-		if (*Codec == nullptr) {
+		//*Codec = avcodec_find_encoder_by_name("h264_nvenc");
+		//if (*Codec == nullptr) {
 			*Codec = avcodec_find_encoder(CodecId);
-		}
+		//}
 	}
 	else {
 		*Codec = avcodec_find_encoder(CodecId);
@@ -284,37 +274,59 @@ bool FRTMPPublisher::AddStream(FOutputStream& Stream, struct AVCodec** Codec, en
 		CodecCtx->sample_rate = PublisherConfig.SampleRate;
 		CodecCtx->channel_layout = AV_CH_LAYOUT_STEREO;
 		CodecCtx->channels = av_get_channel_layout_nb_channels(CodecCtx->channel_layout);
+
+		if (OutputFormatCtx->oformat->flags & AVFMT_GLOBALHEADER) {
+			CodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+		}
+
+		if (avcodec_parameters_from_context(Stream.Stream->codecpar, CodecCtx) < 0)
+		{
+			return false;
+		}
+
 		Stream.Stream->time_base = { 1, CodecCtx->sample_rate };
 		break;
 	}
 	case AVMEDIA_TYPE_VIDEO:
 	{
 		CodecCtx->bit_rate = PublisherConfig.VideoBitrate;
-		CodecCtx->rc_min_rate = CodecCtx->bit_rate;
-		CodecCtx->rc_max_rate = CodecCtx->bit_rate;
-		CodecCtx->bit_rate_tolerance = CodecCtx->bit_rate;
-		CodecCtx->rc_buffer_size = CodecCtx->bit_rate;
+		//CodecCtx->rc_min_rate = CodecCtx->bit_rate;
+		//CodecCtx->rc_max_rate = CodecCtx->bit_rate;
+		//CodecCtx->bit_rate_tolerance = CodecCtx->bit_rate;
+		//CodecCtx->rc_buffer_size = CodecCtx->bit_rate;
 		CodecCtx->width = PublisherConfig.Width;
 		CodecCtx->height = PublisherConfig.Height;
-		
-		Stream.Stream->time_base = { 1, PublisherConfig.Framerate };
-		CodecCtx->time_base = Stream.Stream->time_base;
-		CodecCtx->framerate = { PublisherConfig.Framerate, 1 };
-		Stream.Stream->avg_frame_rate = CodecCtx->framerate;
-		CodecCtx->frame_number = 1;
 
-		CodecCtx->gop_size = PublisherConfig.Framerate;
+		CodecCtx->time_base = { 1, PublisherConfig.Framerate };
+		CodecCtx->framerate = { PublisherConfig.Framerate, 1 };
+		CodecCtx->frame_number = 1;
+		CodecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
+		CodecCtx->gop_size = 12;
 		CodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 		CodecCtx->profile = FF_PROFILE_H264_BASELINE;
-		if (CodecCtx->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
-			CodecCtx->max_b_frames = 2;
+		CodecCtx->me_range = 16;
+		CodecCtx->max_b_frames = 2;
+		CodecCtx->qcompress = 0.8;
+		CodecCtx->max_qdiff = 4;
+		CodecCtx->level = 30;
+		CodecCtx->qmin = 18;
+		CodecCtx->qmax = 28;
+
+		av_opt_set(CodecCtx->priv_data, "preset", "ultrafast", 0);
+		//av_opt_set(CodecCtx->priv_data, "profile", "baseline", 0);
+		av_opt_set(CodecCtx->priv_data, "tune", "zerolatency", 0);
+
+		if (OutputFormatCtx->oformat->flags & AVFMT_GLOBALHEADER) {
+			CodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 		}
 
-		if (CodecCtx->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
-			CodecCtx->mb_decision = 2;
+		if (avcodec_parameters_from_context(Stream.Stream->codecpar, CodecCtx) < 0)
+		{
+			return false;
 		}
-		av_opt_set(CodecCtx->priv_data, "preset", "fast", 0);
-		av_opt_set(CodecCtx->priv_data, "profile", "baseline", 0);
+
+		Stream.Stream->time_base = { 1, PublisherConfig.Framerate };
+		Stream.Stream->avg_frame_rate = CodecCtx->framerate;
 
 		break;
 	}
@@ -322,12 +334,8 @@ bool FRTMPPublisher::AddStream(FOutputStream& Stream, struct AVCodec** Codec, en
 		return false;
 	}
 
-	if (OutputFormatCtx->oformat->flags & AVFMT_GLOBALHEADER) {
-		CodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-	}
-
-	CodecCtx->codec_tag = 0;
-	Stream.Stream->codecpar->codec_tag = 0;
+	//CodecCtx->codec_tag = 0;
+	//Stream.Stream->codecpar->codec_tag = 0;
 
 	return true;
 }
@@ -501,7 +509,7 @@ bool FRTMPPublisher::SendVideoFrame()
 
 	FEncodeFramePayload RawData;
 	{
-		FScopeLock Lock(&VideoFrameQueueCS);
+		//FScopeLock Lock(&VideoFrameQueueCS);
 		if (VideoFrameQueue.IsEmpty()) {
 			return false;
 		}
@@ -634,6 +642,6 @@ void FRTMPPublisher::OnViewportRecorded(const FColor* ColorBuffer, uint32 Width,
 	Payload.Width = Width;
 	Payload.Height = Height;
 
-	FScopeLock Lock(&VideoFrameQueueCS);
+	//FScopeLock Lock(&VideoFrameQueueCS);
 	VideoFrameQueue.Enqueue(Payload);
 }

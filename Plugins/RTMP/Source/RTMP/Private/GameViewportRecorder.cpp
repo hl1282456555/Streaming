@@ -6,11 +6,19 @@
 #include "Slate/SceneViewport.h"
 #include "Engine/GameEngine.h"
 
+#if WITH_EDITOR
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "IAssetViewport.h"
+#endif
+
 DEFINE_LOG_CATEGORY(LogGameViewportRecorder);
 
 FGameViewportRecorder::FGameViewportRecorder(const FIntPoint& RecordResolution)
 {
 	bInitialized = SetupBackBufferCapturer(RecordResolution);
+	CaptureFrameInterval = std::chrono::milliseconds(0);
+	LastFrameTime = std::chrono::steady_clock::now();
 }
 
 FGameViewportRecorder::~FGameViewportRecorder()
@@ -27,7 +35,7 @@ bool FGameViewportRecorder::IsInitialized() const
 	return bInitialized;
 }
 
-bool FGameViewportRecorder::StartRecord()
+bool FGameViewportRecorder::StartRecord(int32 InCaptureRate)
 {
 	if (!bInitialized) {
 		return false;
@@ -42,6 +50,8 @@ bool FGameViewportRecorder::StartRecord()
 		UE_LOG(LogGameViewportRecorder, Warning, TEXT("Slate application is not initialized, can not start record."));
 		return false;
 	}
+
+	CaptureFrameInterval = std::chrono::milliseconds(1000 / InCaptureRate);
 
 	OnBackBufferReadyToPresent = FSlateApplication::Get().GetRenderer()->OnBackBufferReadyToPresent().AddRaw(this, &FGameViewportRecorder::OnBackBufferReadyToPresentCallback);
 
@@ -68,18 +78,51 @@ bool FGameViewportRecorder::SetupBackBufferCapturer(FIntPoint Resolution)
 
 	uint32 NumSurfaces = 3;
 
-	UGameEngine* GameEngine = Cast<UGameEngine>(GEngine);
-	if (GameEngine == nullptr) {
+	TSharedPtr<FSceneViewport> SceneViewport;
+
+#if WITH_EDITOR
+	if (GIsEditor)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::PIE)
+			{
+				FSlatePlayInEditorInfo* SlatePlayInEditorSession = GEditor->SlatePlayInEditorMap.Find(Context.ContextHandle);
+				if (SlatePlayInEditorSession)
+				{
+					if (SlatePlayInEditorSession->DestinationSlateViewport.IsValid())
+					{
+						TSharedPtr<IAssetViewport> DestinationLevelViewport = SlatePlayInEditorSession->DestinationSlateViewport.Pin();
+						SceneViewport = DestinationLevelViewport->GetSharedActiveViewport();
+					}
+					else if (SlatePlayInEditorSession->SlatePlayInEditorWindowViewport.IsValid())
+					{
+						SceneViewport = SlatePlayInEditorSession->SlatePlayInEditorWindowViewport;
+					}
+				}
+			}
+		}
+	}
+	else
+#endif
+	{
+		UGameEngine* gameEngine = Cast<UGameEngine>(GEngine);
+		if (gameEngine == nullptr || !gameEngine->SceneViewport.IsValid()) {
+			return false;
+		}
+
+		SceneViewport = gameEngine->SceneViewport;
+	}
+
+	if (!SceneViewport) {
 		return false;
 	}
 
-	TSharedRef<FSceneViewport> Viewport = GameEngine->SceneViewport.ToSharedRef();
-
-	FIntRect CaptureRect(0, 0, Viewport->GetSize().X, Viewport->GetSize().Y);
+	FIntRect CaptureRect(0, 0, SceneViewport->GetSize().X, SceneViewport->GetSize().Y);
 	FIntPoint WindowSize(0, 0);
 
 	// Set up the capture rectangle
-	TSharedPtr<SViewport> ViewportWidget = Viewport->GetViewportWidget().Pin();
+	TSharedPtr<SViewport> ViewportWidget = SceneViewport->GetViewportWidget().Pin();
 	if (!ViewportWidget.IsValid()) {
 		return false;
 	}
@@ -140,6 +183,15 @@ void FGameViewportRecorder::OnBackBufferReadyToPresentCallback(SWindow& SlateWin
 	}
 
 	check(IsInRenderingThread());
+
+	std::chrono::steady_clock::time_point NowTime = std::chrono::steady_clock::now();
+	std::chrono::milliseconds LastFramePassedTime = std::chrono::duration_cast<std::chrono::milliseconds>(NowTime - LastFrameTime);
+	if (LastFramePassedTime < CaptureFrameInterval)
+	{
+		return;
+	}
+
+	LastFrameTime = NowTime;
 
 	const int32 PrevCaptureIndexOffset = FMath::Clamp(FrameGrabLatency, 0, Surfaces.Num() - 1);
 	const int32 ThisCaptureIndex = CurrentFrameIndex;

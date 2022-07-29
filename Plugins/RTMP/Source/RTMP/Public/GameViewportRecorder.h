@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "FrameGrabber.h"
 
+#include <chrono>
+
 DECLARE_LOG_CATEGORY_EXTERN(LogGameViewportRecorder, Log, All);
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnViewportRecorded, const FColor*, uint32, uint32);
 
@@ -21,7 +23,7 @@ public:
 
 	bool IsInitialized() const;
 
-	bool StartRecord();
+	bool StartRecord(int32 InCaptureRate);
 	void StopRecord();
 
 protected:
@@ -35,6 +37,10 @@ protected:
 
 private:
 	bool bInitialized;
+
+	// framerate i.e:33ms = 30fps
+	std::chrono::milliseconds CaptureFrameInterval;
+	std::chrono::steady_clock::time_point LastFrameTime;
 
 	FOnViewportRecorded OnViewportRecorded;
 

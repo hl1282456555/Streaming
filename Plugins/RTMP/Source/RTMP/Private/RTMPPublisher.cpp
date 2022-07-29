@@ -48,20 +48,21 @@ bool FRTMPPublisher::Init()
 
 uint32 FRTMPPublisher::Run()
 {
-	FTimespan VideoIntervalTime = FTimespan::FromMilliseconds(1000.0f / PublisherConfig.Framerate);
-	FDateTime LastVideoTime = FDateTime::Now();
-	FDateTime LastAudioTime = FDateTime::Now();
+	//FTimespan VideoIntervalTime = FTimespan::FromMilliseconds(1000.0f / PublisherConfig.Framerate);
+	//FDateTime LastVideoTime = FDateTime::Now();
+	//FDateTime LastAudioTime = FDateTime::Now();
 	while (!bStopEncodeThread)
 	{
 		if (av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) > 0) {
 			SendAudioFrame();
 		}
 
-		/*av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) <= 0;*/
-		/*FTimespan VideoPassedTime = FDateTime::Now() - LastVideoTime;
+		//av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) <= 0;
+		/*FDateTime NowTime = FDateTime::Now();
+		FTimespan VideoPassedTime = NowTime - LastVideoTime;
 		if (VideoPassedTime >= VideoIntervalTime) {
-			LastVideoTime = FDateTime::Now();
 			SendVideoFrame();
+			LastVideoTime = NowTime;
 		}*/
 		SendVideoFrame();
 	}
@@ -169,7 +170,7 @@ bool FRTMPPublisher::StartPublish()
 		AudioDevice->RegisterSubmixBufferListener(this);
 	}
 
-	if (!ViewportRecorder->StartRecord()) {
+	if (!ViewportRecorder->StartRecord(PublisherConfig.Framerate)) {
 		UE_LOG(LogRTMPPublisher, Error, TEXT("Cloud not start to record game viewport."));
 		return false;
 	}

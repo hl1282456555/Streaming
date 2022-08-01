@@ -53,7 +53,7 @@ uint32 FRTMPPublisher::Run()
 	//FDateTime LastAudioTime = FDateTime::Now();
 	while (!bStopEncodeThread)
 	{
-		if (av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) > 0) {
+		if (av_compare_ts(VideoStream.NextPts, VideoStream.CodecCtx->time_base, AudioStream.NextPts, AudioStream.CodecCtx->time_base) >= 0) {
 			SendAudioFrame();
 		}
 
@@ -562,7 +562,7 @@ bool FRTMPPublisher::SendVideoFrame()
 		return false;
 	}
 
-	return SendFrameInternal(&CodecCtx->time_base, VideoStream.Stream, &Packet);
+	return SendFrameInternal(&CodecCtx->time_base, VideoStream.Stream, &Packet) == 0;
 }
 
 bool FRTMPPublisher::SendAudioFrame()
@@ -579,9 +579,6 @@ bool FRTMPPublisher::SendAudioFrame()
 		AudioSubmixBuffer.RemoveAt(0, FrameBytes);
 	}
 
-	AudioStream.TempFrame->pts = AudioStream.NextPts;
-	AudioStream.NextPts += AudioStream.TempFrame->nb_samples;
-
 	int32 DST_NB_Samples = av_rescale_rnd(swr_get_delay(AudioStream.SwrCtx, AudioStream.CodecCtx->sample_rate) + AudioStream.TempFrame->nb_samples,
 		AudioStream.CodecCtx->sample_rate, AudioStream.CodecCtx->sample_rate, AV_ROUND_UP);
 
@@ -597,6 +594,7 @@ bool FRTMPPublisher::SendAudioFrame()
 
 	AudioStream.Frame->pts = av_rescale_q(AudioStream.SamplesCount, { 1, AudioStream.CodecCtx->sample_rate }, AudioStream.CodecCtx->time_base);
 	AudioStream.SamplesCount += DST_NB_Samples;
+	//AudioStream.NextPts++;
 
 	int32 Result = avcodec_send_frame(AudioStream.CodecCtx, AudioStream.Frame);
 	if (Result < 0) {
@@ -608,28 +606,12 @@ bool FRTMPPublisher::SendAudioFrame()
 	FMemory::Memset(Packet, 0);
 	av_init_packet(&Packet);
 
-	while (Result >= 0)
-	{
-		Result = avcodec_receive_packet(AudioStream.CodecCtx, &Packet);
-		if (Result == AVERROR(EAGAIN) || Result == AVERROR_EOF) {
-			break;
-		}
-		else if (Result < 0) {
-			UE_LOG(LogFFMPEGEncoder_Audio, Error, TEXT("Error encoding a frame."));
-			return false;
-		}
-
-		av_packet_rescale_ts(&Packet, AudioStream.CodecCtx->time_base, AudioStream.Stream->time_base);
-		Packet.stream_index = AudioStream.Stream->index;
-
-		Result = av_interleaved_write_frame(OutputFormatCtx, &Packet);
-		if (Result < 0) {
-			UE_LOG(LogFFMPEGEncoder_Audio, Error, TEXT("Error while writing output packet, error: %d."), Result);
-			return false;
-		}
+	if (avcodec_receive_packet(AudioStream.CodecCtx, &Packet) < 0) {
+		UE_LOG(LogFFMPEGEncoder_Audio, Error, TEXT("Cloud not find useful packet."));
+		return false;
 	}
 
-	return Result == AVERROR_EOF;
+	return SendFrameInternal(&AudioStream.CodecCtx->time_base, AudioStream.Stream, &Packet) == 0;
 }
 
 bool FRTMPPublisher::SendFrameInternal(const struct AVRational* TimeBase, struct AVStream* Stream, struct AVPacket* Packet)

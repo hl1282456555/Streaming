@@ -26,10 +26,10 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	UFUNCTION(BlueprintCallable)
-		void StartTest(const FRTMPPublisherConfig& Config);
+		void StartPublish(const FRTMPPublisherConfig& Config);
 
 	UFUNCTION(BlueprintCallable)
-		void StopTest();
+		void StopPublish();
 
 private:
 	TSharedPtr<class FRTMPPublisher> Publisher;

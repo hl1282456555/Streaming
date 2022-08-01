@@ -234,6 +234,11 @@ void FRTMPPublisher::Shutdown()
 	FrozenFrame = FEncodeFramePayload();
 }
 
+bool FRTMPPublisher::IsInitialized() const
+{
+	return bInitialized;
+}
+
 bool FRTMPPublisher::AddStream(FOutputStream& Stream, struct AVCodec** Codec, enum AVCodecID CodecId)
 {
 	AVCodecContext* CodecCtx;
@@ -619,7 +624,7 @@ bool FRTMPPublisher::SendAudioFrame()
 
 		Result = av_interleaved_write_frame(OutputFormatCtx, &Packet);
 		if (Result < 0) {
-			UE_LOG(LogFFMPEGEncoder_Audio, Error, TEXT("Error while writing output packet."));
+			UE_LOG(LogFFMPEGEncoder_Audio, Error, TEXT("Error while writing output packet, error: %d."), Result);
 			return false;
 		}
 	}

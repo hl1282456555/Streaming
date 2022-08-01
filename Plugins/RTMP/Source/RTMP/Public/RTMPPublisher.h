@@ -48,6 +48,8 @@ public:
 
 	void Shutdown();
 
+	bool IsInitialized() const;
+
 protected:
 
 	bool AddStream(FOutputStream& Stream, struct AVCodec** Codec, enum AVCodecID CodecId);

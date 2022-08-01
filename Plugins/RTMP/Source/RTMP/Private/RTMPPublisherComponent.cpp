@@ -33,17 +33,20 @@ void URTMPPublisherComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	// ...
 }
 
-void URTMPPublisherComponent::StartTest(const FRTMPPublisherConfig& Config)
+void URTMPPublisherComponent::StartPublish(const FRTMPPublisherConfig& Config)
 {
-	if (!Publisher->Setup(Config)) {
+	if (!Publisher || !Publisher->Setup(Config)) {
 		return;
 	}
 
 	Publisher->StartPublish();
 }
 
-void URTMPPublisherComponent::StopTest()
+void URTMPPublisherComponent::StopPublish()
 {
-	Publisher->Shutdown();
+	if (Publisher && Publisher->IsInitialized())
+	{
+		Publisher->Shutdown();
+	}
 }
 
